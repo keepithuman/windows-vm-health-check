@@ -1,0 +1,29 @@
+# Python requirements for Windows VM Health Check Playbook
+# Install with: pip install -r requirements.txt
+
+# Ansible version
+ansible>=8.0.0,<10.0.0
+
+# Windows-specific requirements
+pywinrm>=0.4.3  # WinRM client for Windows communication
+pywinrm[kerberos]>=0.4.3  # Kerberos authentication support
+pywinrm[credssp]>=0.4.3  # CredSSP authentication support
+
+# Core Python packages
+jinja2>=3.1.0  # Template engine
+pyyaml>=6.0    # YAML parsing
+paramiko>=3.0.0  # SSH client (for mixed environments)
+
+# Windows-specific enhancements
+requests>=2.28.0  # HTTP library for API calls
+requests-ntlm>=1.1.0  # NTLM authentication
+requests-kerberos>=0.14.0  # Kerberos support
+
+# Optional: for enhanced reporting and Windows management
+pypsexec>=0.3.0  # PSExec functionality
+smbprotocol>=1.10.1  # SMB protocol support
+wmi>=1.5.1  # WMI queries (if running on Windows control node)
+
+# Optional: for enhanced monitoring capabilities
+psutil>=5.9.0  # System monitoring (cross-platform)
+tabulate>=0.9.0  # Table formatting for reports
