@@ -1,0 +1,155 @@
+---
+# Ansible Inventory for Windows VM Health Checks
+# Configure your Windows VMs below
+
+all:
+  children:
+    windows_vms:
+      children:
+        production:
+          hosts:
+            # win-server-01:
+            #   ansible_host: 10.1.1.10
+            #   ansible_user: Administrator
+            #   ansible_password: "{{ vault_admin_password }}"
+            # win-web-01:
+            #   ansible_host: 10.1.1.11
+            #   ansible_user: Administrator
+            #   ansible_password: "{{ vault_admin_password }}"
+        
+        staging:
+          hosts:
+            # win-stage-01:
+            #   ansible_host: 10.2.1.10
+            #   ansible_user: Administrator
+            #   ansible_password: "{{ vault_admin_password }}"
+        
+        development:
+          hosts:
+            # win-dev-01:
+            #   ansible_host: 10.3.1.10
+            #   ansible_user: Administrator
+            #   ansible_password: "{{ vault_admin_password }}"
+            # Uncomment below for local testing with localhost
+            # localhost:
+            #   ansible_connection: local
+  
+  vars:
+    # Global Windows connection settings
+    ansible_connection: winrm
+    ansible_winrm_transport: basic
+    ansible_winrm_server_cert_validation: ignore
+    ansible_winrm_port: 5985
+    ansible_winrm_scheme: http
+    
+    # Health check thresholds (can be overridden per host/group)
+    disk_threshold_warning: 80
+    disk_threshold_critical: 90
+    memory_threshold_warning: 80
+    memory_threshold_critical: 90
+    cpu_threshold_warning: 80
+    event_log_hours: 24
+    
+    # Services to monitor (can be customized per environment)
+    check_services:
+      - "Spooler"
+      - "BITS"
+      - "Themes"
+      - "RpcEptMapper"
+      - "Winmgmt"
+    
+    # Critical processes to verify are running
+    check_processes:
+      - "explorer"
+      - "winlogon"
+      - "csrss"
+    
+    # Ports to verify are listening
+    check_ports:
+      - 3389  # RDP
+      - 5985  # WinRM HTTP
+    
+    # Fail playbook on critical issues (set to false for monitoring only)
+    fail_on_critical: false
+
+# Environment-specific configurations
+production:
+  vars:
+    # Stricter thresholds for production
+    disk_threshold_warning: 70
+    memory_threshold_warning: 75
+    fail_on_critical: true  # Fail fast in production
+    check_services:
+      - "Spooler"
+      - "BITS"
+      - "Themes"
+      - "RpcEptMapper"
+      - "Winmgmt"
+      - "W3SVC"        # IIS Web Service
+      - "MSSQLSERVER"  # SQL Server
+      - "EventLog"     # Windows Event Log
+    check_ports:
+      - 3389  # RDP
+      - 5985  # WinRM HTTP
+      - 80    # HTTP
+      - 443   # HTTPS
+      - 1433  # SQL Server
+    event_log_hours: 48  # More comprehensive log analysis
+
+staging:
+  vars:
+    # Moderate thresholds for staging
+    disk_threshold_warning: 75
+    memory_threshold_warning: 80
+    check_services:
+      - "Spooler"
+      - "BITS"
+      - "Themes"
+      - "RpcEptMapper"
+      - "Winmgmt"
+      - "W3SVC"  # IIS Web Service
+    check_ports:
+      - 3389  # RDP
+      - 5985  # WinRM HTTP
+      - 80    # HTTP
+      - 443   # HTTPS
+
+development:
+  vars:
+    # Relaxed thresholds for development
+    disk_threshold_warning: 85
+    memory_threshold_warning: 85
+    cpu_threshold_warning: 90
+    fail_on_critical: false   # Never fail on dev environments
+    event_log_hours: 8       # Less log history needed
+    check_services:
+      - "Spooler"
+      - "BITS"
+      - "Themes"
+      - "RpcEptMapper"
+      - "Winmgmt"
+    check_ports:
+      - 3389  # RDP
+      - 5985  # WinRM HTTP
+
+# Security note: Store sensitive credentials in Ansible Vault
+# Create vault file with: ansible-vault create group_vars/all/vault.yml
+# Example vault content:
+# ---
+# vault_admin_password: "YourSecurePassword123!"
+# vault_domain_user: "DOMAIN\\serviceaccount"
+# vault_domain_password: "ServiceAccountPassword!"
+
+# Alternative authentication methods:
+# 1. Domain authentication:
+#   ansible_user: "{{ vault_domain_user }}"
+#   ansible_password: "{{ vault_domain_password }}"
+#
+# 2. Certificate-based authentication:
+#   ansible_winrm_transport: certificate
+#   ansible_winrm_cert_pem: /path/to/certificate.pem
+#   ansible_winrm_cert_key_pem: /path/to/private_key.pem
+#
+# 3. Kerberos authentication:
+#   ansible_winrm_transport: kerberos
+#   ansible_user: "user@DOMAIN.COM"
