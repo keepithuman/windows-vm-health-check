@@ -1,0 +1,42 @@
+{
+  "health_check": {
+    "timestamp": "{{ health_check_timestamp }}",
+    "hostname": "{{ inventory_hostname }}",
+    "status": "{{ health_status }}",
+    "summary": {
+      "warnings_count": {{ warnings|length }},
+      "critical_issues_count": {{ critical_issues|length }}
+    }
+  },
+  "system_info": {{ system_info | to_nice_json(indent=2) | indent(2) }},
+  "performance_metrics": {
+    "cpu": {
+      "usage_percent": {{ cpu_usage }},
+      "processor_count": {{ system_info.processor_count }}
+    },
+    "memory": {{ memory_info | to_nice_json(indent=2) | indent(4) }},
+    "disk_usage": {{ disk_usage | to_nice_json(indent=2) | indent(4) }},
+    "performance_counters": {{ performance_counters | to_nice_json(indent=2) | indent(4) }}
+  },
+  "network": {
+    "interfaces": {{ network_interfaces | to_nice_json(indent=2) | indent(4) }},
+    "port_status": {{ port_status | to_nice_json(indent=2) | indent(4) }}
+  },
+  "services": {
+    "checked_services": {{ check_services | to_nice_json }},
+    "service_status": {{ service_status | to_nice_json(indent=2) | indent(4) }}
+  },
+  "processes": {
+    "checked_processes": {{ check_processes | to_nice_json }},
+    "process_status": {{ process_status | to_nice_json(indent=2) | indent(4) }}
+  },
+  "events": {
+    "analysis_timeframe_hours": {{ event_log_hours }},
+    "event_log_analysis": {{ event_log_analysis | to_nice_json(indent=2) | indent(4) }}
+  },
+  "windows_updates": {{ windows_update_info | to_nice_json(indent=2) | indent(2) }},
+  "issues": {
+    "warnings": {{ warnings | to_nice_json(indent=2) | indent(4) }},
+    "critical": {{ critical_issues | to_nice_json(indent=2) | indent(4) }}
+  }
+}
