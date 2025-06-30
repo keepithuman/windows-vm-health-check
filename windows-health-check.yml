@@ -1,0 +1,520 @@
+---
+# Windows VM Health Check Playbook
+# Comprehensive health monitoring and diagnostics for Windows virtual machines
+# Compatible with Windows Server 2016, 2019, 2022, Windows 10, and Windows 11
+
+- name: Windows VM Health Check and Diagnostics
+  hosts: windows_vms
+  gather_facts: true
+  vars:
+    health_check_timestamp: "{{ ansible_date_time.iso8601 }}"
+    report_dir: "C:\\temp\\health_reports"
+    disk_threshold_warning: 80
+    disk_threshold_critical: 90
+    memory_threshold_warning: 80
+    memory_threshold_critical: 90
+    cpu_threshold_warning: 80
+    event_log_hours: 24
+    check_services:
+      - "Spooler"
+      - "BITS"
+      - "Themes"
+      - "RpcEptMapper"
+      - "Winmgmt"
+    check_processes:
+      - "explorer"
+      - "winlogon"
+      - "csrss"
+    check_ports:
+      - 3389
+      - 5985
+      - 5986
+    
+  tasks:
+    - name: Create health report directory
+      win_file:
+        path: "{{ report_dir }}"
+        state: directory
+      tags: ['setup']
+
+    - name: Initialize health status variables
+      set_fact:
+        health_status: "HEALTHY"
+        warnings: []
+        critical_issues: []
+        system_info: {}
+      tags: ['always']
+
+    - name: Gather comprehensive system information
+      win_shell: |
+        $computerInfo = Get-ComputerInfo
+        $uptime = (Get-Date) - (gcim Win32_OperatingSystem).LastBootUpTime
+        $result = @{
+          hostname = $env:COMPUTERNAME
+          domain = $computerInfo.CsDomain
+          os_name = $computerInfo.WindowsProductName
+          os_version = $computerInfo.WindowsVersion
+          os_build = $computerInfo.WindowsBuildLabEx
+          architecture = $computerInfo.CsProcessors[0].Architecture
+          total_memory_gb = [math]::Round($computerInfo.TotalPhysicalMemory / 1GB, 2)
+          processor_count = $computerInfo.CsNumberOfProcessors
+          processor_name = $computerInfo.CsProcessors[0].Name
+          uptime_days = [math]::Round($uptime.TotalDays, 2)
+          last_boot_time = (gcim Win32_OperatingSystem).LastBootUpTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
+          windows_directory = $computerInfo.WindowsDirectory
+          system_drive = $computerInfo.SystemDirectory.Substring(0,2)
+        }
+        $result | ConvertTo-Json -Depth 3
+      register: system_info_raw
+      tags: ['info', 'always']
+
+    - name: Parse system information
+      set_fact:
+        system_info: "{{ system_info_raw.stdout | from_json }}"
+      tags: ['info', 'always']
+
+    - name: Check CPU usage
+      win_shell: |
+        $cpu = Get-WmiObject -Class Win32_Processor | Measure-Object -Property LoadPercentage -Average
+        [math]::Round($cpu.Average, 1)
+      register: cpu_usage_raw
+      tags: ['cpu', 'performance']
+
+    - name: Set CPU usage fact
+      set_fact:
+        cpu_usage: "{{ cpu_usage_raw.stdout | trim | float }}"
+      tags: ['cpu', 'performance']
+
+    - name: Evaluate CPU health
+      block:
+        - name: Add CPU warning
+          set_fact:
+            warnings: "{{ warnings + ['High CPU usage: ' + cpu_usage|string + '%'] }}"
+          when: cpu_usage|float > cpu_threshold_warning
+        
+        - name: Add CPU critical
+          set_fact:
+            critical_issues: "{{ critical_issues + ['Critical CPU usage: ' + cpu_usage|string + '%'] }}"
+            health_status: "CRITICAL"
+          when: cpu_usage|float > 95
+      tags: ['cpu', 'performance']
+
+    - name: Check memory usage
+      win_shell: |
+        $memory = Get-WmiObject -Class Win32_OperatingSystem
+        $totalMemory = $memory.TotalVisibleMemorySize * 1KB
+        $freeMemory = $memory.FreePhysicalMemory * 1KB
+        $usedMemory = $totalMemory - $freeMemory
+        $usedPercent = [math]::Round(($usedMemory / $totalMemory) * 100, 1)
+        
+        $pageFile = Get-WmiObject -Class Win32_PageFileUsage
+        $pageFileUsedPercent = if ($pageFile) { 
+          [math]::Round(($pageFile.CurrentUsage / $pageFile.AllocatedBaseSize) * 100, 1) 
+        } else { 0 }
+        
+        $result = @{
+          total_gb = [math]::Round($totalMemory / 1GB, 2)
+          free_gb = [math]::Round($freeMemory / 1GB, 2)
+          used_gb = [math]::Round($usedMemory / 1GB, 2)
+          used_percent = $usedPercent
+          page_file_used_percent = $pageFileUsedPercent
+          page_file_size_gb = if ($pageFile) { [math]::Round($pageFile.AllocatedBaseSize / 1MB * 1GB / 1GB, 2) } else { 0 }
+        }
+        $result | ConvertTo-Json
+      register: memory_info_raw
+      tags: ['memory', 'performance']
+
+    - name: Parse memory information
+      set_fact:
+        memory_info: "{{ memory_info_raw.stdout | from_json }}"
+      tags: ['memory', 'performance']
+
+    - name: Evaluate memory health
+      block:
+        - name: Add memory warning
+          set_fact:
+            warnings: "{{ warnings + ['High memory usage: ' + memory_info.used_percent|string + '%'] }}"
+          when: memory_info.used_percent|float > memory_threshold_warning
+        
+        - name: Add memory critical
+          set_fact:
+            critical_issues: "{{ critical_issues + ['Critical memory usage: ' + memory_info.used_percent|string + '%'] }}"
+            health_status: "CRITICAL"
+          when: memory_info.used_percent|float > memory_threshold_critical
+        
+        - name: Add page file warning
+          set_fact:
+            warnings: "{{ warnings + ['High page file usage: ' + memory_info.page_file_used_percent|string + '%'] }}"
+          when: memory_info.page_file_used_percent|float > 75
+      tags: ['memory', 'performance']
+
+    - name: Check disk usage
+      win_shell: |
+        $disks = Get-WmiObject -Class Win32_LogicalDisk -Filter "DriveType=3"
+        $diskInfo = @()
+        foreach ($disk in $disks) {
+          $usedSpace = $disk.Size - $disk.FreeSpace
+          $usedPercent = [math]::Round(($usedSpace / $disk.Size) * 100, 1)
+          $diskInfo += @{
+            drive = $disk.DeviceID
+            size_gb = [math]::Round($disk.Size / 1GB, 2)
+            free_gb = [math]::Round($disk.FreeSpace / 1GB, 2)
+            used_gb = [math]::Round($usedSpace / 1GB, 2)
+            used_percent = $usedPercent
+            file_system = $disk.FileSystem
+            volume_name = $disk.VolumeName
+          }
+        }
+        $diskInfo | ConvertTo-Json
+      register: disk_usage_raw
+      tags: ['disk', 'storage']
+
+    - name: Parse disk information
+      set_fact:
+        disk_usage: "{{ disk_usage_raw.stdout | from_json }}"
+      tags: ['disk', 'storage']
+
+    - name: Evaluate disk health
+      block:
+        - name: Check for disk warnings
+          set_fact:
+            warnings: "{{ warnings + ['High disk usage on ' + item.drive + ': ' + item.used_percent|string + '%'] }}"
+          loop: "{{ disk_usage if disk_usage is iterable and disk_usage[0] is mapping else [disk_usage] }}"
+          when: item.used_percent > disk_threshold_warning
+        
+        - name: Check for disk critical issues
+          set_fact:
+            critical_issues: "{{ critical_issues + ['Critical disk usage on ' + item.drive + ': ' + item.used_percent|string + '%'] }}"
+            health_status: "CRITICAL"
+          loop: "{{ disk_usage if disk_usage is iterable and disk_usage[0] is mapping else [disk_usage] }}"
+          when: item.used_percent > disk_threshold_critical
+      tags: ['disk', 'storage']
+
+    - name: Check network interfaces
+      win_shell: |
+        $adapters = Get-WmiObject -Class Win32_NetworkAdapter -Filter "NetEnabled=true"
+        $networkInfo = @()
+        foreach ($adapter in $adapters) {
+          $config = Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter "Index=$($adapter.Index)"
+          $networkInfo += @{
+            name = $adapter.Name
+            description = $adapter.Description
+            mac_address = $adapter.MACAddress
+            status = $adapter.NetConnectionStatus
+            ip_addresses = $config.IPAddress
+            dhcp_enabled = $config.DHCPEnabled
+          }
+        }
+        $networkInfo | ConvertTo-Json -Depth 3
+      register: network_info_raw
+      tags: ['network']
+
+    - name: Parse network information
+      set_fact:
+        network_interfaces: "{{ network_info_raw.stdout | from_json }}"
+      tags: ['network']
+
+    - name: Check for network issues
+      set_fact:
+        warnings: "{{ warnings + ['Network adapter ' + item.name + ' appears disconnected'] }}"
+      loop: "{{ network_interfaces if network_interfaces is iterable and network_interfaces[0] is mapping else [network_interfaces] }}"
+      when: item.status != 2  # 2 = Connected
+      tags: ['network']
+
+    - name: Check Windows services status
+      win_shell: |
+        $serviceResults = @()
+        $servicesToCheck = @({{ check_services | map('quote') | join(', ') }})
+        foreach ($serviceName in $servicesToCheck) {
+          $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+          if ($service) {
+            $serviceResults += @{
+              name = $service.Name
+              display_name = $service.DisplayName
+              status = $service.Status.ToString()
+              start_type = (Get-WmiObject -Class Win32_Service -Filter "Name='$($service.Name)'").StartMode
+            }
+          } else {
+            $serviceResults += @{
+              name = $serviceName
+              display_name = "Service not found"
+              status = "NotFound"
+              start_type = "Unknown"
+            }
+          }
+        }
+        $serviceResults | ConvertTo-Json -Depth 2
+      register: service_status_raw
+      tags: ['services']
+
+    - name: Parse service information
+      set_fact:
+        service_status: "{{ service_status_raw.stdout | from_json }}"
+      tags: ['services']
+
+    - name: Evaluate service health
+      block:
+        - name: Check for stopped critical services
+          set_fact:
+            critical_issues: "{{ critical_issues + ['Critical service ' + item.name + ' (' + item.display_name + ') is ' + item.status] }}"
+            health_status: "CRITICAL"
+          loop: "{{ service_status if service_status is iterable and service_status[0] is mapping else [service_status] }}"
+          when: item.status != "Running" and item.start_type == "Auto"
+        
+        - name: Check for missing services
+          set_fact:
+            warnings: "{{ warnings + ['Service ' + item.name + ' not found on system'] }}"
+          loop: "{{ service_status if service_status is iterable and service_status[0] is mapping else [service_status] }}"
+          when: item.status == "NotFound"
+      tags: ['services']
+
+    - name: Check critical processes
+      win_shell: |
+        $processResults = @()
+        $processesToCheck = @({{ check_processes | map('quote') | join(', ') }})
+        foreach ($processName in $processesToCheck) {
+          $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
+          $processResults += @{
+            name = $processName
+            running = ($processes -ne $null)
+            count = if ($processes) { $processes.Count } else { 0 }
+          }
+        }
+        $processResults | ConvertTo-Json -Depth 2
+      register: process_status_raw
+      tags: ['processes']
+
+    - name: Parse process information
+      set_fact:
+        process_status: "{{ process_status_raw.stdout | from_json }}"
+      tags: ['processes']
+
+    - name: Evaluate process health
+      set_fact:
+        critical_issues: "{{ critical_issues + ['Critical process ' + item.name + ' is not running'] }}"
+        health_status: "CRITICAL"
+      loop: "{{ process_status if process_status is iterable and process_status[0] is mapping else [process_status] }}"
+      when: not item.running
+      tags: ['processes']
+
+    - name: Check listening ports
+      win_shell: |
+        $portResults = @()
+        $portsToCheck = @({{ check_ports | join(', ') }})
+        $listeningPorts = netstat -an | Select-String ":(\d+)\s+.*LISTENING" | ForEach-Object { 
+          [int]($_.Matches[0].Groups[1].Value) 
+        }
+        foreach ($port in $portsToCheck) {
+          $portResults += @{
+            port = $port
+            listening = ($listeningPorts -contains $port)
+          }
+        }
+        $portResults | ConvertTo-Json -Depth 2
+      register: port_status_raw
+      tags: ['network', 'ports']
+
+    - name: Parse port information
+      set_fact:
+        port_status: "{{ port_status_raw.stdout | from_json }}"
+      tags: ['network', 'ports']
+
+    - name: Evaluate port health
+      set_fact:
+        warnings: "{{ warnings + ['Port ' + item.port|string + ' is not listening'] }}"
+      loop: "{{ port_status if port_status is iterable and port_status[0] is mapping else [port_status] }}"
+      when: not item.listening
+      tags: ['network', 'ports']
+
+    - name: Check event logs for errors
+      win_shell: |
+        $hoursBack = {{ event_log_hours }}
+        $startTime = (Get-Date).AddHours(-$hoursBack)
+        
+        $systemErrors = Get-WinEvent -FilterHashtable @{LogName='System'; Level=1,2; StartTime=$startTime} -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count
+        $appErrors = Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2; StartTime=$startTime} -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count
+        $securityWarnings = Get-WinEvent -FilterHashtable @{LogName='Security'; Level=3; StartTime=$startTime} -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count
+        
+        $result = @{
+          system_errors = if ($systemErrors) { $systemErrors } else { 0 }
+          application_errors = if ($appErrors) { $appErrors } else { 0 }
+          security_warnings = if ($securityWarnings) { $securityWarnings } else { 0 }
+          timeframe_hours = $hoursBack
+        }
+        $result | ConvertTo-Json
+      register: event_log_analysis_raw
+      tags: ['events', 'logs']
+
+    - name: Parse event log information
+      set_fact:
+        event_log_analysis: "{{ event_log_analysis_raw.stdout | from_json }}"
+      tags: ['events', 'logs']
+
+    - name: Evaluate event log health
+      block:
+        - name: Check for system errors
+          set_fact:
+            warnings: "{{ warnings + ['Found ' + event_log_analysis.system_errors|string + ' system errors in last ' + event_log_hours|string + ' hours'] }}"
+          when: event_log_analysis.system_errors|int > 5
+        
+        - name: Check for application errors
+          set_fact:
+            warnings: "{{ warnings + ['Found ' + event_log_analysis.application_errors|string + ' application errors in last ' + event_log_hours|string + ' hours'] }}"
+          when: event_log_analysis.application_errors|int > 10
+        
+        - name: Check for security warnings
+          set_fact:
+            warnings: "{{ warnings + ['Found ' + event_log_analysis.security_warnings|string + ' security warnings in last ' + event_log_hours|string + ' hours'] }}"
+          when: event_log_analysis.security_warnings|int > 5
+      tags: ['events', 'logs']
+
+    - name: Check Windows Update status
+      win_shell: |
+        try {
+          $updateSession = New-Object -ComObject Microsoft.Update.Session
+          $updateSearcher = $updateSession.CreateUpdateSearcher()
+          $searchResult = $updateSearcher.Search("IsInstalled=0")
+          
+          $wsusService = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
+          
+          $result = @{
+            pending_updates_count = $searchResult.Updates.Count
+            important_updates = 0
+            optional_updates = 0
+            windows_update_service_status = if ($wsusService) { $wsusService.Status.ToString() } else { "NotFound" }
+            last_search_success = $true
+          }
+          
+          foreach ($update in $searchResult.Updates) {
+            if ($update.MsrcSeverity -eq "Important" -or $update.MsrcSeverity -eq "Critical") {
+              $result.important_updates++
+            } else {
+              $result.optional_updates++
+            }
+          }
+          
+          $result | ConvertTo-Json
+        } catch {
+          @{
+            pending_updates_count = -1
+            important_updates = -1
+            optional_updates = -1
+            windows_update_service_status = "Unknown"
+            last_search_success = $false
+            error = $_.Exception.Message
+          } | ConvertTo-Json
+        }
+      register: windows_update_raw
+      tags: ['updates']
+
+    - name: Parse Windows Update information
+      set_fact:
+        windows_update_info: "{{ windows_update_raw.stdout | from_json }}"
+      tags: ['updates']
+
+    - name: Evaluate Windows Update health
+      block:
+        - name: Check for pending important updates
+          set_fact:
+            warnings: "{{ warnings + ['Found ' + windows_update_info.important_updates|string + ' important/critical Windows updates pending'] }}"
+          when: windows_update_info.important_updates|int > 0
+        
+        - name: Check Windows Update service status
+          set_fact:
+            warnings: "{{ warnings + ['Windows Update service is ' + windows_update_info.windows_update_service_status] }}"
+          when: windows_update_info.windows_update_service_status != "Running"
+        
+        - name: Check update search failures
+          set_fact:
+            warnings: "{{ warnings + ['Windows Update search failed: ' + windows_update_info.error|default('Unknown error')] }}"
+          when: not windows_update_info.last_search_success
+      tags: ['updates']
+
+    - name: Check system performance counters
+      win_shell: |
+        $perfCounters = @{
+          processor_queue_length = (Get-Counter "\System\Processor Queue Length").CounterSamples[0].CookedValue
+          memory_pages_per_sec = (Get-Counter "\Memory\Pages/sec").CounterSamples[0].CookedValue
+          memory_available_bytes = (Get-Counter "\Memory\Available Bytes").CounterSamples[0].CookedValue
+          disk_queue_length = (Get-Counter "\PhysicalDisk(_Total)\Current Disk Queue Length").CounterSamples[0].CookedValue
+        }
+        $perfCounters | ConvertTo-Json
+      register: performance_counters_raw
+      tags: ['performance']
+
+    - name: Parse performance counters
+      set_fact:
+        performance_counters: "{{ performance_counters_raw.stdout | from_json }}"
+      tags: ['performance']
+
+    - name: Evaluate performance counter health
+      block:
+        - name: Check processor queue length
+          set_fact:
+            warnings: "{{ warnings + ['High processor queue length: ' + performance_counters.processor_queue_length|string] }}"
+          when: performance_counters.processor_queue_length|float > (system_info.processor_count|int * 2)
+        
+        - name: Check memory paging rate
+          set_fact:
+            warnings: "{{ warnings + ['High memory paging rate: ' + performance_counters.memory_pages_per_sec|string + ' pages/sec'] }}"
+          when: performance_counters.memory_pages_per_sec|float > 1000
+        
+        - name: Check disk queue length
+          set_fact:
+            warnings: "{{ warnings + ['High disk queue length: ' + performance_counters.disk_queue_length|string] }}"
+          when: performance_counters.disk_queue_length|float > 2
+      tags: ['performance']
+
+    - name: Set overall health status
+      set_fact:
+        health_status: "WARNING"
+      when: warnings|length > 0 and health_status == "HEALTHY"
+      tags: ['always']
+
+    - name: Generate health report
+      win_template:
+        src: health_report.j2
+        dest: "{{ report_dir }}\\{{ inventory_hostname }}_health_{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':', '') }}.json"
+      tags: ['report']
+
+    - name: Display health summary
+      debug:
+        msg: |
+          === WINDOWS VM HEALTH CHECK SUMMARY ===
+          Host: {{ inventory_hostname }}
+          Status: {{ health_status }}
+          Timestamp: {{ health_check_timestamp }}
+          
+          System Info:
+          - OS: {{ system_info.os_name }}
+          - Version: {{ system_info.os_version }}
+          - Domain: {{ system_info.domain }}
+          - Uptime: {{ system_info.uptime_days }} days
+          - Memory: {{ system_info.total_memory_gb }} GB
+          - Processors: {{ system_info.processor_count }}
+          
+          Performance Metrics:
+          - CPU Usage: {{ cpu_usage }}%
+          - Memory Usage: {{ memory_info.used_percent }}%
+          - Page File Usage: {{ memory_info.page_file_used_percent }}%
+          
+          {% if warnings|length > 0 %}
+          Warnings ({{ warnings|length }}):
+          {% for warning in warnings %}
+          - {{ warning }}
+          {% endfor %}
+          {% endif %}
+          
+          {% if critical_issues|length > 0 %}
+          Critical Issues ({{ critical_issues|length }}):
+          {% for issue in critical_issues %}
+          - {{ issue }}
+          {% endfor %}
+          {% endif %}
+      tags: ['always']
+
+    - name: Fail playbook if critical issues found
+      fail:
+        msg: "Critical issues detected on {{ inventory_hostname }}. Health status: {{ health_status }}"
+      when: health_status == "CRITICAL" and (fail_on_critical | default(false) | bool)
+      tags: ['always']
