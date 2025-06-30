@@ -1,0 +1,5 @@
+---
+# Main entry point for Windows VM Health Check
+# This file includes the main health check playbook
+
+- import_playbook: windows-health-check.yml
